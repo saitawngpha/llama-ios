@@ -1,0 +1,112 @@
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version
+        required: true
+        type: string
+
+      tag:
+        description: llama.cpp tag or commit
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout Package Repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout llama.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          path: llama.cpp
+          ref: ${{ github.event.inputs.tag }}
+
+      - name: Fail if release tag exists
+        run: |
+          git fetch --tags
+
+          if git rev-parse "${{ github.event.inputs.version }}" >/dev/null 2>&1; then
+            echo "Tag already exists"
+            exit 1
+          fi
+
+      - name: Build XCFramework
+        run: |
+          cd llama.cpp
+
+          chmod +x build-xcframework.sh
+          ./build-xcframework.sh
+
+      - name: Locate XCFramework
+        run: |
+          XCFRAMEWORK=$(find llama.cpp -name "*.xcframework" | head -n 1)
+
+          echo "XCFRAMEWORK_PATH=$XCFRAMEWORK" >> $GITHUB_ENV
+
+      - name: Zip XCFramework
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "${{ env.XCFRAMEWORK_PATH }}" \
+            Llama.xcframework.zip
+
+      - name: Compute Checksum
+        run: |
+          CHECKSUM=$(swift package compute-checksum Llama.xcframework.zip)
+
+          echo "FILE_CHECKSUM=$CHECKSUM" >> $GITHUB_ENV
+
+      - name: Generate Package.swift
+        run: |
+          cat > Package.swift <<EOF
+          // swift-tools-version: 5.9
+          import PackageDescription
+
+          let package = Package(
+              name: "LlamaCpp",
+              platforms: [
+                  .iOS(.v15)
+              ],
+              products: [
+                  .library(
+                      name: "LlamaCpp",
+                      targets: ["LlamaCpp"]
+                  )
+              ],
+              targets: [
+                  .binaryTarget(
+                      name: "LlamaCpp",
+                      url: "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.version }}/Llama.xcframework.zip",
+                      checksum: "${{ env.FILE_CHECKSUM }}"
+                  )
+              ]
+          )
+          EOF
+
+      - name: Commit Package.swift
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: Release ${{ github.event.inputs.version }}
+          file_pattern: Package.swift
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: LlamaCpp ${{ github.event.inputs.version }}
+          body: |
+            Source Tag: ${{ github.event.inputs.tag }}
+
+          files: |
+            Llama.xcframework.zip
